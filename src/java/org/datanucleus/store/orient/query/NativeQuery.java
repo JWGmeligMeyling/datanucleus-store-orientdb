@@ -22,15 +22,15 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
+import com.tinkerpop.blueprints.impls.orient.OrientGraph;
+import org.datanucleus.ExecutionContext;
 import org.datanucleus.exceptions.NucleusUserException;
 import org.datanucleus.metadata.AbstractClassMetaData;
-import org.datanucleus.store.ExecutionContext;
+import org.datanucleus.store.StoreManager;
 import org.datanucleus.store.connection.ManagedConnection;
 import org.datanucleus.store.orient.OrientStoreManager;
-import org.datanucleus.store.orient.OrientUtils;
 import org.datanucleus.store.query.AbstractJavaQuery;
 import org.datanucleus.util.Localiser;
-import com.orientechnologies.orient.core.db.object.ODatabaseObjectTx;
 import com.orientechnologies.orient.core.query.OQuery;
 
 /**
@@ -38,8 +38,10 @@ import com.orientechnologies.orient.core.query.OQuery;
 public class NativeQuery extends AbstractJavaQuery
 {
     /** Localiser for messages. */
-    protected static final Localiser LOCALISER_ORIENT = Localiser.getInstance(
-        "org.datanucleus.store.orient.Localisation", OrientStoreManager.class.getClassLoader());
+    {
+        Localiser.registerBundle(
+            "org.datanucleus.store.orient.Localisation", OrientStoreManager.class.getClassLoader());
+    }
 
     /** The Predicate for the native query. */
     protected OQuery predicate = null;
@@ -48,9 +50,14 @@ public class NativeQuery extends AbstractJavaQuery
      * Constructs a new query instance that uses the given persistence manager.
      * @param ec execution context
      */
-    public NativeQuery(ExecutionContext ec)
+    public NativeQuery(StoreManager storeManager, ExecutionContext ec)
     {
-        this(ec, null);
+        this(storeManager, ec, null);
+    }
+
+    @Override
+    public void compileGeneric(Map map) {
+
     }
 
     /**
@@ -60,13 +67,13 @@ public class NativeQuery extends AbstractJavaQuery
      * @param predicate The native query predicate
      * @throws NucleusUserException When the second parameter isnt an implementation of a Predicate
      */
-    public NativeQuery(ExecutionContext ec, Object predicate)
+    public NativeQuery(StoreManager storeManager, ExecutionContext ec, Object predicate)
     {
-        super(ec);
+        super(storeManager, ec);
 
         if (!(predicate instanceof OQuery))
         {
-            throw new NucleusUserException(LOCALISER_ORIENT.msg("Orient.Native.NeedsPredicate"));
+            throw new NucleusUserException(Localiser.msg("Orient.Native.NeedsPredicate"));
         }
 
         this.predicate = (OQuery)predicate;
@@ -91,13 +98,13 @@ public class NativeQuery extends AbstractJavaQuery
     protected Object performExecute(Map parameters)
     {
         ManagedConnection mconn = ec.getStoreManager().getConnection(ec);
-        ODatabaseObjectTx cont = (ODatabaseObjectTx) mconn.getConnection();
+        OrientGraph cont = (OrientGraph) mconn.getConnection();
         try
         {
 
             ArrayList results = new ArrayList();
             AbstractClassMetaData cmd = null;
-            Iterator iter = cont.query(predicate).iterator();
+            Iterator iter = cont.getRawGraph().query(predicate).iterator();
             while (iter.hasNext())
             {
                 Object obj = iter.next();
@@ -108,7 +115,7 @@ public class NativeQuery extends AbstractJavaQuery
                         cmd = ec.getMetaDataManager().getMetaDataForClass(getCandidateClassName(), 
                             ec.getClassLoaderResolver());
                     }
-                    OrientUtils.prepareOrientObjectForUse(obj, ec, cont, cmd, (OrientStoreManager)ec.getStoreManager());
+//                    OrientUtils.prepareOrientObjectForUse(obj, ec, cont, cmd, (OrientStoreManager)ec.getStoreManager());
                 }
             }
 

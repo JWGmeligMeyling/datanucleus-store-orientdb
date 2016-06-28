@@ -17,13 +17,19 @@ Contributors:
  **********************************************************************/
 package org.datanucleus.store.orient.query;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import com.orientechnologies.orient.core.sql.OCommandSQL;
+import com.tinkerpop.blueprints.impls.orient.OrientDynaElementIterable;
+import com.tinkerpop.blueprints.impls.orient.OrientElement;
+import com.tinkerpop.blueprints.impls.orient.OrientGraph;
 import org.datanucleus.ClassLoaderResolver;
+import org.datanucleus.ExecutionContext;
 import org.datanucleus.exceptions.NucleusUserException;
 import org.datanucleus.metadata.AbstractClassMetaData;
 import org.datanucleus.query.compiler.QueryCompilation;
@@ -36,15 +42,13 @@ import org.datanucleus.query.expression.Literal;
 import org.datanucleus.query.expression.ParameterExpression;
 import org.datanucleus.query.expression.PrimaryExpression;
 import org.datanucleus.query.expression.SubqueryExpression;
-import org.datanucleus.store.ExecutionContext;
+import org.datanucleus.store.StoreManager;
 import org.datanucleus.store.connection.ManagedConnection;
-import org.datanucleus.store.orient.OrientStoreManager;
 import org.datanucleus.store.orient.OrientUtils;
 import org.datanucleus.store.query.AbstractJDOQLQuery;
+import org.datanucleus.util.Localiser;
 import org.datanucleus.util.NucleusLogger;
 
-import com.orientechnologies.orient.core.db.object.ODatabaseObject;
-import com.orientechnologies.orient.core.db.object.ODatabaseObjectTx;
 import com.orientechnologies.orient.core.query.OQuery;
 import com.orientechnologies.orient.core.sql.query.OSQLSynchQuery;
 
@@ -54,33 +58,17 @@ import com.orientechnologies.orient.core.sql.query.OSQLSynchQuery;
  */
 public class JDOQLQuery extends AbstractJDOQLQuery
 {
-    /**
-     * Constructs a new query instance that uses the given persistence manager.
-     * @param ec execution context
-     */
-    public JDOQLQuery(ExecutionContext ec)
-    {
-        this(ec, (JDOQLQuery) null);
+
+    public JDOQLQuery(StoreManager storeMgr, ExecutionContext ec) {
+        super(storeMgr, ec);
     }
 
-    /**
-     * Constructs a new query instance having the same criteria as the given query.
-     * @param ec execution context
-     * @param q The query from which to copy criteria.
-     */
-    public JDOQLQuery(ExecutionContext ec, JDOQLQuery q)
-    {
-        super(ec, q);
+    public JDOQLQuery(StoreManager storeMgr, ExecutionContext ec, AbstractJDOQLQuery q) {
+        super(storeMgr, ec, q);
     }
 
-    /**
-     * Constructor for a JDOQL query where the query is specified using the "Single-String" format.
-     * @param ec execution context
-     * @param query The query string
-     */
-    public JDOQLQuery(ExecutionContext ec, String query)
-    {
-        super(ec, query);
+    public JDOQLQuery(StoreManager storeMgr, ExecutionContext ec, String query) {
+        super(storeMgr, ec, query);
     }
 
     protected Object performExecute(Map parameters)
@@ -94,14 +82,14 @@ public class JDOQLQuery extends AbstractJDOQLQuery
 
         boolean inMemory = evaluateInMemory();
         ManagedConnection mconn = ec.getStoreManager().getConnection(ec);
-        ODatabaseObjectTx cont = (ODatabaseObjectTx) mconn.getConnection();
+        OrientGraph cont = (OrientGraph) mconn.getConnection();
         try
         {
             // Execute the query
             long startTime = System.currentTimeMillis();
             if (NucleusLogger.QUERY.isDebugEnabled())
             {
-                NucleusLogger.QUERY.debug(LOCALISER.msg("021046", "JDOQL", getSingleStringQuery(), null));
+                NucleusLogger.QUERY.debug(Localiser.msg("021046", "JDOQL", getSingleStringQuery(), null));
             }
             List candidates = null;
             boolean filterInMemory = false;
@@ -109,8 +97,17 @@ public class JDOQLQuery extends AbstractJDOQLQuery
             // if (datastoreCompilation == null)
             // {
             // Create the SODA query optionally with the candidate and filter restrictions
-            OQuery query = createSQLQuery(cont, compilation, parameters, inMemory);
-            candidates = cont.query(query);
+            OSQLSynchQuery query = createSQLQuery(cont, compilation, parameters, inMemory);
+            OrientDynaElementIterable result = cont.command(new OCommandSQL(query.getText())).execute();
+
+            AbstractClassMetaData cmd = ec.getMetaDataManager().getMetaDataForClass(candidateClass, ec.getClassLoaderResolver());
+            candidates = new ArrayList();
+
+            for (Object obj : result) {
+//                candidates.add(obj);
+                candidates.add(OrientUtils.getObjectForPropertyContainer((OrientElement) obj, cmd, ec, !query.isUseCache()));
+            }
+
             if (inMemory)
             {
                 filterInMemory = true;
@@ -130,17 +127,17 @@ public class JDOQLQuery extends AbstractJDOQLQuery
 
             if (NucleusLogger.QUERY.isDebugEnabled())
             {
-                NucleusLogger.QUERY.debug(LOCALISER.msg("021074", "JDOQL", "" + (System.currentTimeMillis() - startTime)));
+                NucleusLogger.QUERY.debug(Localiser.msg("021074", "JDOQL", "" + (System.currentTimeMillis() - startTime)));
             }
 
             // Assign StateManagers to any returned objects
             Iterator iter = results.iterator();
-            while (iter.hasNext())
-            {
-                Object obj = iter.next();
-                AbstractClassMetaData cmd = ec.getMetaDataManager().getMetaDataForClass(obj.getClass(), clr);
-                OrientUtils.prepareOrientObjectForUse(obj, ec, (ODatabaseObjectTx) cont, cmd, (OrientStoreManager) ec.getStoreManager());
-            }
+//            while (iter.hasNext())
+//            {
+//                Object obj = iter.next();
+//                AbstractClassMetaData cmd = ec.getMetaDataManager().getMetaDataForClass(obj.getClass(), clr);
+//                OrientUtils.prepareOrientObjectForUse(obj, ec, (ODatabaseObjectTx) cont, cmd, (OrientStoreManager) ec.getStoreManager());
+//            }
             return results;
         }
         finally
@@ -157,7 +154,7 @@ public class JDOQLQuery extends AbstractJDOQLQuery
      * @param inMemory
      * @return
      */
-    private OQuery createSQLQuery(ODatabaseObjectTx cont, QueryCompilation compilation, Map parameters, boolean inMemory)
+    private OSQLSynchQuery createSQLQuery(OrientGraph cont, QueryCompilation compilation, Map parameters, boolean inMemory)
     {
        
         Expression where = compilation.getExprFilter();
@@ -169,9 +166,10 @@ public class JDOQLQuery extends AbstractJDOQLQuery
         }
         
         Class candidateClass = compilation.getCandidateClass();
-        ((OrientStoreManager)ec.getStoreManager()).registerClassInOrient(cont, candidateClass);
-        
-        sqlQuery.append(candidateClass.getSimpleName());
+//      ((OrientStoreManager)ec.getStoreManager()).registerClassInOrient(cont, candidateClass);
+        String table = ec.getMetaDataManager().getMetaDataForClass(candidateClass, ec.getClassLoaderResolver()).getTable();
+
+        sqlQuery.append(table);
 
         if (where != null)
         {
@@ -180,7 +178,7 @@ public class JDOQLQuery extends AbstractJDOQLQuery
 
         }
         // TODO in memory
-        OQuery query = new OSQLSynchQuery(sqlQuery.toString());
+        OSQLSynchQuery query = new OSQLSynchQuery(sqlQuery.toString());
 
         return query;
     }

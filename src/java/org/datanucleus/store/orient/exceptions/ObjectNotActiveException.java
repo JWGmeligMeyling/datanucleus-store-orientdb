@@ -27,8 +27,12 @@ import org.datanucleus.util.StringUtils;
  */
 public class ObjectNotActiveException extends NucleusException
 {
-    private static final Localiser LOCALISER=Localiser.getInstance("org.datanucleus.store.orient.Localisation",
-        OrientStoreManager.class.getClassLoader());
+    {
+        Localiser.registerBundle(
+            "org.datanucleus.store.orient.Localisation",
+            OrientStoreManager.class.getClassLoader()
+        );
+    }
 
     /** The object that is not activated. */
     private final Object pc;
@@ -39,7 +43,7 @@ public class ObjectNotActiveException extends NucleusException
      */
     public ObjectNotActiveException(Object pc)
     {
-        super(LOCALISER.msg("Orient.ObjectNotActive", StringUtils.toJVMIDString(pc)));
+        super(Localiser.msg("Orient.ObjectNotActive", StringUtils.toJVMIDString(pc)));
         this.pc = pc;
     }
 

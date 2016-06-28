@@ -21,8 +21,10 @@ import java.util.Map;
 
 import javax.transaction.xa.XAResource;
 
-import org.datanucleus.OMFContext;
-import org.datanucleus.exceptions.NucleusException;
+import com.tinkerpop.blueprints.impls.orient.OrientGraph;
+import com.tinkerpop.blueprints.impls.orient.OrientGraphFactory;
+import org.datanucleus.ExecutionContext;
+import org.datanucleus.store.StoreManager;
 import org.datanucleus.store.connection.AbstractConnectionFactory;
 import org.datanucleus.store.connection.AbstractManagedConnection;
 import org.datanucleus.store.connection.ManagedConnection;
@@ -30,69 +32,67 @@ import org.datanucleus.util.Localiser;
 import org.datanucleus.util.NucleusLogger;
 
 import com.orientechnologies.orient.core.db.object.ODatabaseObject;
-import com.orientechnologies.orient.core.db.object.ODatabaseObjectTx;
 
 /**
  * Implementation of a ConnectionFactory for Orient Database. </p>
  */
 public class ConnectionFactoryImpl extends AbstractConnectionFactory {
-	protected static final Localiser	LOCALISER_ORIENT	= Localiser.getInstance("org.datanucleus.store.orient.Localisation",
-																													OrientStoreManager.class.getClassLoader());
+	{
+		Localiser.registerBundle("org.datanucleus.store.orient.Localisation",
+			OrientStoreManager.class.getClassLoader());
+	}
 
-	private String										url;
-
-	private String										username;
-
-	private String										password;
+	protected final OrientGraphFactory orientGraphFactory;
 
 	/**
 	 * Constructor
 	 * 
-	 * @param omfContext
-	 *          The OMF context
+	 * @param storeManager
+	 *          The Store Manager
 	 * @param resourceType
 	 *          Type of resource (tx, nontx)
 	 */
-	public ConnectionFactoryImpl(OMFContext omfContext, String resourceType) {
-		super(omfContext, resourceType);
+	public ConnectionFactoryImpl(StoreManager storeManager, String resourceType) {
+		super(storeManager, resourceType);
 
-		this.url = omfContext.getStoreManager().getConnectionURL();
-		this.username = omfContext.getStoreManager().getConnectionUserName();
-		this.password = omfContext.getStoreManager().getConnectionPassword();
-		if (!(url.startsWith("remote:") || url.startsWith("local:"))) {
-			throw new NucleusException(LOCALISER_ORIENT.msg("Orient.URLInvalid", url));
-		}
+		this.orientGraphFactory = new OrientGraphFactory(
+			storeManager.getConnectionURL().substring(7),
+			storeManager.getConnectionUserName(),
+			storeManager.getConnectionPassword()
+		);
+//		if (!(url.startsWith("remote:") || url.startsWith("local:"))) {
+//			throw new NucleusException(LOCALISER_ORIENT.msg("Orient.URLInvalid", url));
+//		}
 	}
 
 	/**
 	 * Obtain a connection from the Factory. The connection will be enlisted within the {@link org.datanucleus.Transaction} associated
 	 * to the <code>poolKey</code> if "enlist" is set to true.
 	 * 
-	 * @param poolKey
-	 *          the pool that is bound the connection during its lifecycle (or null)
-	 * @param options
+	 * @param executionContext
+	 *          the  ExecutionContext
+	 * @param map
 	 *          Any options for then creating the connection
 	 * @return the {@link org.datanucleus.store.connection.ManagedConnection}
 	 */
-	public ManagedConnection createManagedConnection(Object poolKey, @SuppressWarnings("rawtypes") Map options) {
-		return new ManagedConnectionImpl(omfContext, options);
+	public ManagedConnection createManagedConnection(ExecutionContext executionContext, Map map) {
+		return new ManagedConnectionImpl(executionContext, map);
 	}
 
 	/**
 	 * Implementation of a ManagedConnection for Orient.
 	 */
 	class ManagedConnectionImpl extends AbstractManagedConnection {
-		OMFContext	omf;
+		ExecutionContext	omf;
 
 		/**
 		 * Constructor.
 		 * 
 		 * @param omf
-		 * @param poolKey
 		 * @param transactionOptions
 		 *          Any options
 		 */
-		ManagedConnectionImpl(OMFContext omf, @SuppressWarnings("rawtypes") Map transactionOptions) {
+		ManagedConnectionImpl(ExecutionContext omf, @SuppressWarnings("rawtypes") Map transactionOptions) {
 			this.omf = omf;
 		}
 
@@ -103,8 +103,8 @@ public class ConnectionFactoryImpl extends AbstractConnectionFactory {
 			return null;
 		}
 
-		public ODatabaseObject getOrientConnection() {
-			return (ODatabaseObject) conn;
+		public OrientGraph getOrientConnection() {
+			return (OrientGraph) conn;
 		}
 
 		/**
@@ -112,10 +112,8 @@ public class ConnectionFactoryImpl extends AbstractConnectionFactory {
 		 */
 		public Object getConnection() {
 			if (conn == null) {
-				NucleusLogger.CONNECTION.debug(LOCALISER_ORIENT.msg("Orient.connecting", url, username));// TODO
-				conn = new ODatabaseObjectTx(url).open(username, password);
-				NucleusLogger.CONNECTION.info(LOCALISER_ORIENT.msg("Orient.connected", url, username));// TODO
-				((OrientStoreManager) omf.getStoreManager()).registerObjectContainer((ODatabaseObjectTx) conn);
+				conn = orientGraphFactory.getTx();
+				((OrientStoreManager) storeMgr).registerObjectContainer((OrientGraph) conn);
 			}
 			return conn;
 		}
@@ -128,7 +126,7 @@ public class ConnectionFactoryImpl extends AbstractConnectionFactory {
 				listeners.get(i).managedConnectionPreClose();
 			}
 
-			ODatabaseObject conn = getOrientConnection();
+			OrientGraph conn = getOrientConnection();
 			if (conn != null) {
 
 				String connStr = conn.toString();
@@ -136,19 +134,19 @@ public class ConnectionFactoryImpl extends AbstractConnectionFactory {
 					if (!conn.isClosed()) {
 						conn.commit();
 						if (NucleusLogger.CONNECTION.isDebugEnabled()) {
-							NucleusLogger.CONNECTION.debug(LOCALISER_ORIENT.msg("Orient.commitOnClose", connStr));// TODO
+							NucleusLogger.CONNECTION.debug(Localiser.msg("Orient.commitOnClose", connStr));// TODO
 						}
 					}
 				}
 
 				if (!conn.isClosed()) {
-					conn.close();
+					conn.shutdown(true);
 					if (NucleusLogger.CONNECTION.isDebugEnabled()) {
-						NucleusLogger.CONNECTION.debug(LOCALISER_ORIENT.msg("Orient.closingConnection", connStr));// TODO
+						NucleusLogger.CONNECTION.debug(Localiser.msg("Orient.closingConnection", connStr));// TODO
 					}
 				} else {
 					if (NucleusLogger.CONNECTION.isDebugEnabled()) {
-						NucleusLogger.CONNECTION.debug(LOCALISER_ORIENT.msg("Orient.connectionAlreadyClosed", connStr));// TODO
+						NucleusLogger.CONNECTION.debug(Localiser.msg("Orient.connectionAlreadyClosed", connStr));// TODO
 					}
 				}
 
@@ -161,7 +159,7 @@ public class ConnectionFactoryImpl extends AbstractConnectionFactory {
 			} finally {
 				listeners.clear();
 			}
-			((OrientStoreManager) omf.getStoreManager()).deregisterObjectContainer((ODatabaseObjectTx) conn);
+			((OrientStoreManager) storeMgr).deregisterObjectContainer(conn);
 			this.conn = null;
 		}
 	}

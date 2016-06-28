@@ -12,6 +12,12 @@
         DataNucleus supports persistence to heterogeneous datastores and this plugin provides persistence to Orient.
     </description>
 
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <version.orient.db>2.1.17</version.orient.db>
+    </properties>
+
     <repositories>
         <repository>
             <id>local.repository</id>
@@ -37,7 +43,7 @@
         <dependency>
             <groupId>org.datanucleus</groupId>
             <artifactId>datanucleus-core</artifactId>
-            <version>2.2.0-m2-SNAPSHOT</version>
+            <version>4.1.7</version>
             <scope>provided</scope>
         </dependency>
         <!-- TODO Remove this when code fixed. Should have no dep on JDO (or JPA) -->
@@ -47,26 +53,48 @@
             <version>[3.0, )</version>
             <scope>provided</scope>
         </dependency>
+        <!--<dependency>-->
+        	<!--<groupId>com.orientechnologies</groupId>-->
+        	<!--<artifactId>orient-commons</artifactId>-->
+        	<!--<version>[0.9.23-SNAPSHOT, )</version>-->
+        	<!--<scope>provided</scope>-->
+        	<!--<optional>false</optional>-->
+        <!--</dependency>-->
+        <!--<dependency>-->
+        	<!--<groupId>com.orientechnologies</groupId>-->
+        	<!--<artifactId>orientdb-core</artifactId>-->
+        	<!--<version>[0.9.23-SNAPSHOT, )</version>-->
+        	<!--<scope>provided</scope>-->
+        	<!--<optional>false</optional>-->
+        <!--</dependency>-->
+        <!--<dependency>-->
+        	<!--<groupId>com.orientechnologies</groupId>-->
+        	<!--<artifactId>orientdb-client</artifactId>-->
+        	<!--<version>[0.9.23-SNAPSHOT, )</version>-->
+        	<!--<scope>provided</scope>-->
+        	<!--<optional>false</optional>-->
+        <!--</dependency>-->
         <dependency>
-        	<groupId>com.orientechnologies</groupId>
-        	<artifactId>orient-commons</artifactId>
-        	<version>[0.9.23-SNAPSHOT, )</version>
-        	<scope>provided</scope>
-        	<optional>false</optional>
+            <groupId>com.orientechnologies</groupId>
+            <artifactId>orientdb-core</artifactId>
+            <version>${version.orient.db}</version>
         </dependency>
         <dependency>
-        	<groupId>com.orientechnologies</groupId>
-        	<artifactId>orientdb-core</artifactId>
-        	<version>[0.9.23-SNAPSHOT, )</version>
-        	<scope>provided</scope>
-        	<optional>false</optional>
+            <groupId>com.orientechnologies</groupId>
+            <artifactId>orientdb-client</artifactId>
+            <version>${version.orient.db}</version>
         </dependency>
+
         <dependency>
-        	<groupId>com.orientechnologies</groupId>
-        	<artifactId>orientdb-client</artifactId>
-        	<version>[0.9.23-SNAPSHOT, )</version>
-        	<scope>provided</scope>
-        	<optional>false</optional>
+            <groupId>com.orientechnologies</groupId>
+            <artifactId>orientdb-graphdb</artifactId>
+            <version>${version.orient.db}</version>
+            <exclusions>
+                <exclusion>
+                    <artifactId>gremlin-groovy</artifactId>
+                    <groupId>com.tinkerpop.gremlin</groupId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 

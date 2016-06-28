@@ -21,7 +21,8 @@ import java.util.Collections;
 import java.util.Map;
 
 import org.datanucleus.ClassLoaderResolver;
-import org.datanucleus.store.ExecutionContext;
+import org.datanucleus.ExecutionContext;
+import org.datanucleus.store.StoreManager;
 import org.datanucleus.store.connection.ManagedConnection;
 import org.datanucleus.store.orient.OrientStoreManager;
 import org.datanucleus.store.query.AbstractJPQLQuery;
@@ -35,36 +36,21 @@ import org.datanucleus.util.Localiser;
  */
 public class JPQLQuery extends AbstractJPQLQuery
 {
-    protected static final Localiser LOCALISER_ORIENT = Localiser.getInstance(
-        "org.datanucleus.store.orient.Localisation", OrientStoreManager.class.getClassLoader());
-
-    /**
-     * Constructs a new query instance that uses the given persistence manager.
-     * @param ec execution context
-     */
-    public JPQLQuery(ExecutionContext ec)
     {
-        this(ec, (JPQLQuery) null);
+        Localiser.registerBundle(
+            "org.datanucleus.store.orient.Localisation", OrientStoreManager.class.getClassLoader());
     }
 
-    /**
-     * Constructs a new query instance having the same criteria as the given query.
-     * @param ec execution context
-     * @param q The query from which to copy criteria.
-     */
-    public JPQLQuery(ExecutionContext ec, JPQLQuery q)
-    {
-        super(ec, q);
+    public JPQLQuery(StoreManager storeMgr, ExecutionContext ec) {
+        super(storeMgr, ec);
     }
 
-    /**
-     * Constructor for a JPQL query where the query is specified using the "Single-String" format.
-     * @param ec execution context
-     * @param query The query string
-     */
-    public JPQLQuery(ExecutionContext ec, String query)
-    {
-        super(ec, query);
+    public JPQLQuery(StoreManager storeMgr, ExecutionContext ec, AbstractJPQLQuery q) {
+        super(storeMgr, ec, q);
+    }
+
+    public JPQLQuery(StoreManager storeMgr, ExecutionContext ec, String query) {
+        super(storeMgr, ec, query);
     }
 
     protected Object performExecute(Map parameters)

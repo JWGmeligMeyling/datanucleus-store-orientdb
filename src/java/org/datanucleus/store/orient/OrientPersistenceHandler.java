@@ -17,38 +17,40 @@ Contributors:
  **********************************************************************/
 package org.datanucleus.store.orient;
 
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-
-import javax.jdo.spi.PersistenceCapable;
-
-import org.datanucleus.ClassLoaderResolver;
+import com.tinkerpop.blueprints.Direction;
+import com.tinkerpop.blueprints.Edge;
+import com.tinkerpop.blueprints.impls.orient.OrientElement;
+import com.tinkerpop.blueprints.impls.orient.OrientGraph;
+import com.tinkerpop.blueprints.impls.orient.OrientVertex;
+import org.datanucleus.ExecutionContext;
 import org.datanucleus.exceptions.NucleusDataStoreException;
+import org.datanucleus.exceptions.NucleusException;
 import org.datanucleus.exceptions.NucleusObjectNotFoundException;
 import org.datanucleus.exceptions.NucleusOptimisticException;
-import org.datanucleus.identity.OID;
-import org.datanucleus.identity.OIDFactory;
+import org.datanucleus.exceptions.NucleusUserException;
+import org.datanucleus.identity.IdentityUtils;
 import org.datanucleus.metadata.AbstractClassMetaData;
+import org.datanucleus.metadata.AbstractMemberMetaData;
+import org.datanucleus.metadata.DiscriminatorMetaData;
+import org.datanucleus.metadata.DiscriminatorStrategy;
 import org.datanucleus.metadata.IdentityType;
 import org.datanucleus.metadata.VersionMetaData;
 import org.datanucleus.metadata.VersionStrategy;
-import org.datanucleus.state.StateManagerFactory;
+import org.datanucleus.state.ObjectProvider;
 import org.datanucleus.store.AbstractPersistenceHandler;
-import org.datanucleus.store.ExecutionContext;
-import org.datanucleus.store.ObjectProvider;
 import org.datanucleus.store.StoreManager;
+import org.datanucleus.store.VersionHelper;
 import org.datanucleus.store.connection.ManagedConnection;
 import org.datanucleus.store.fieldmanager.DeleteFieldManager;
-import org.datanucleus.store.fieldmanager.PersistFieldManager;
-import org.datanucleus.store.orient.fieldmanager.ActivationFieldManager;
+import org.datanucleus.store.fieldmanager.FieldManager;
+import org.datanucleus.store.orient.fieldmanager.FetchFieldManager;
+import org.datanucleus.store.orient.fieldmanager.StoreFieldManager;
+import org.datanucleus.store.schema.table.Table;
 import org.datanucleus.util.Localiser;
 import org.datanucleus.util.NucleusLogger;
 import org.datanucleus.util.StringUtils;
 
-import com.orientechnologies.orient.core.db.object.ODatabaseObjectTx;
-import com.orientechnologies.orient.core.id.ORID;
-import com.orientechnologies.orient.core.id.ORecordId;
+import java.util.Iterator;
 
 /**
  * Persistence handler for persisting to Orient datastores.
@@ -56,183 +58,306 @@ import com.orientechnologies.orient.core.id.ORecordId;
 public class OrientPersistenceHandler extends AbstractPersistenceHandler
 {
     /** Localiser for messages. */
-    protected static final Localiser LOCALISER = Localiser.getInstance("org.datanucleus.store.orient.Localisation",
-        OrientStoreManager.class.getClassLoader());
-
-    /** Manager for the store. */
-    protected final OrientStoreManager storeMgr;
-
-    /**
-     * Thread-specific state information (instances of {@link OperationInfo}) for inserting. Allows us to detect the
-     * primary object to be inserted, so we can call NeoDatis with that and not for any others.
-     */
-    private ThreadLocal insertInfoThreadLocal = new ThreadLocal()
     {
-        protected Object initialValue()
-        {
-            return new OperationInfo();
-        }
-    };
-
-    private static class OperationInfo
-    {
-        /** List of StateManagers to perform the operation on. */
-        List smList = null;
+        Localiser.registerBundle("org.datanucleus.store.orient.Localisation",
+            OrientStoreManager.class.getClassLoader());
     }
 
-    /**
-     * Constructor.
-     * @param storeMgr Manager for the datastore
-     */
     public OrientPersistenceHandler(StoreManager storeMgr)
     {
-        this.storeMgr = (OrientStoreManager) storeMgr;
+        super(storeMgr);
     }
 
-    /**
-     * Method to close the handler and release any resources.
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.StorePersistenceHandler#close()
      */
     public void close()
     {
     }
 
-    /**
-     * Inserts a persistent object into the database.
-     * @param sm The state manager of the object to be inserted.
-     * @throws NucleusDataStoreException when an error occurs in the datastore communication
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.AbstractPersistenceHandler#insertObjects(org.datanucleus.store.ObjectProvider[])
      */
-    public void insertObject(ObjectProvider sm)
+    @Override
+    public void insertObjects(ObjectProvider... ops)
     {
-        // Check if read-only so update not permitted
-        storeMgr.assertReadOnlyForUpdateOfObject(sm);
-
-        // Get the InsertInfo for this thread so we know if this is the primary object or a reachable
-        OperationInfo insertInfo = (OperationInfo) insertInfoThreadLocal.get();
-        boolean primaryObject = false;
-        if (insertInfo.smList == null)
-        {
-            // Primary object
-            primaryObject = true;
-            insertInfo.smList = new ArrayList();
-        }
-        insertInfo.smList.add(sm);
-
-        String className = sm.getObject().getClass().getName();
-        if (!storeMgr.managesClass(className))
-        {
-            // Class is not yet registered here so register it
-            storeMgr.addClass(className, sm.getExecutionContext().getClassLoaderResolver());
-            
-        }
-
-        sm.provideFields(sm.getClassMetaData().getAllMemberPositions(), new PersistFieldManager(sm, false));
-
-        ManagedConnection mconn = storeMgr.getConnection(sm.getExecutionContext());
-        ODatabaseObjectTx connection = (ODatabaseObjectTx) mconn.getConnection();
+        ExecutionContext ec = ops[0].getExecutionContext();
+        ManagedConnection mconn = storeMgr.getConnection(ec);
         try
         {
-            connection.save(sm.getObject());
-            if (storeMgr.getRuntimeManager() != null)
+            OrientGraph db = (OrientGraph)mconn.getConnection();
+
+            long startTime = System.currentTimeMillis();
+            if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
             {
-                storeMgr.getRuntimeManager().incrementInsertCount();
+                NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.InsertObjects.Start", StringUtils.objectArrayToString(ops)));
             }
 
-            ObjectProvider objSM = sm.getExecutionContext().findObjectProvider(sm.getObject());
-            if (objSM != null)
+            // Do initial insert to create PropertyContainers (Node/Relationship)
+            for (ObjectProvider op : ops)
             {
-                AbstractClassMetaData cmd = objSM.getClassMetaData();
-                if (cmd.getIdentityType() == IdentityType.DATASTORE)
-                {
+                insertObjectToPropertyContainer(op, db);
+            }
 
-                    ORID identity = connection.getRecordByUserObject(sm.getObject(), false).getIdentity();
-                    String clusterName = sm.getObject().getClass().getName();
-                    long oid = identity.getClusterPosition();
-                    if (oid > -1)
-                    {
-                        objSM.setPostStoreNewObjectId(OIDFactory.getInstance(storeMgr.getOMFContext(), clusterName, oid));
-                    }
-                    else
-                    {
-                        NucleusLogger.DATASTORE.error(LOCALISER.msg("Orient.Insert.ObjectPersistFailed", sm.toPrintableID()));
-                    }
-                }
+            // Do second pass for relation fields
+            for (ObjectProvider op : ops)
+            {
+                AbstractClassMetaData cmd = op.getClassMetaData();
+                Table table = storeMgr.getStoreDataForClass(cmd.getFullClassName()).getTable();
+                OrientElement propObj = (OrientElement)op.getAssociatedValue(OrientStoreManager.OBJECT_PROVIDER_PROPCONTAINER);
 
-                VersionMetaData vermd = cmd.getVersionMetaData();
-                if (vermd != null && vermd.getVersionStrategy() == VersionStrategy.VERSION_NUMBER)
+                // Process relation fields
+                int[] relPositions = cmd.getRelationMemberPositions(ec.getClassLoaderResolver(), ec.getMetaDataManager());
+                if (relPositions.length > 0)
                 {
-                    // versioned object so update its version
-                    long version = connection.getRecordByUserObject(sm.getObject(), false).getVersion();
-                    objSM.setTransactionalVersion(Long.valueOf(version));
-                    NucleusLogger.DATASTORE.debug(LOCALISER.msg("Orient.Insert.ObjectPersistedWithVersion", sm.toPrintableID(),
-                        objSM.getInternalObjectId(), "" + version));
-                }
-                else
-                {
-                    if (NucleusLogger.DATASTORE.isDebugEnabled())
-                    {
-                        NucleusLogger.DATASTORE.debug(LOCALISER.msg("Orient.Insert.ObjectPersisted", sm.toPrintableID(),
-                            objSM.getInternalObjectId()));
-                    }
+                    StoreFieldManager fm = new StoreFieldManager(op, true, table, propObj);
+                    op.provideFields(relPositions, fm);
                 }
             }
+
+            if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
+            {
+                NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.ExecutionTime", (System.currentTimeMillis() - startTime)));
+            }
+            if (ec.getStatistics() != null)
+            {
+                ec.getStatistics().incrementNumWrites();
+                ec.getStatistics().incrementInsertCount();
+            }
+        }
+        catch (Exception e)
+        {
+            NucleusLogger.PERSISTENCE.error("Exception inserting objects ", e);
+            throw new NucleusDataStoreException("Exception inserting objects", e);
         }
         finally
         {
             mconn.release();
         }
-
-        if (primaryObject)
-        {
-            Iterator iter = insertInfo.smList.iterator();
-            while (iter.hasNext())
-            {
-                ObjectProvider objSM = (ObjectProvider) iter.next();
-                objSM.replaceAllLoadedSCOFieldsWithWrappers();
-            }
-
-            // Clean out the OperationInfo for inserts on this thread
-            insertInfo.smList.clear();
-            insertInfo.smList = null;
-            insertInfoThreadLocal.remove();
-        }
     }
 
     /**
-     * Updates a persistent object in the database.
-     * @param sm The state manager of the object to be updated.
-     * @param fieldNumbers The numbers of the fields to be updated.
-     * @throws NucleusDataStoreException when an error occurs in the datastore communication
-     * @throws NucleusOptimisticException thrown if version checking fails
+     * Method that checks for existence of a PropertyContainer for the specified ObjectProvider,
+     * and creates it when not existing, setting all properties except for any relation fields.
+     * @param op ObjectProvider
+     * @param db The GraphDB
+     * @return The PropertyContainer
+     * @throws NucleusUserException if a property container exists already with this identity or if an error
+     *     occurred during persistence.
      */
-    public void updateObject(ObjectProvider sm, int fieldNumbers[])
+    public OrientElement insertObjectToPropertyContainer(ObjectProvider op, OrientGraph db)
     {
-        storeMgr.assertReadOnlyForUpdateOfObject(sm);
+        assertReadOnlyForUpdateOfObject(op);
 
-        sm.provideFields(fieldNumbers, new PersistFieldManager(sm, false));
-
-        sm.replaceAllLoadedSCOFieldsWithValues();
-
-        ManagedConnection mconn = storeMgr.getConnection(sm.getExecutionContext());
-        ODatabaseObjectTx connection = (ODatabaseObjectTx) mconn.getConnection();
-        try
+        AbstractClassMetaData cmd = op.getClassMetaData();
+        if ((cmd.getIdentityType() == IdentityType.APPLICATION || cmd.getIdentityType() == IdentityType.DATASTORE) &&
+            !cmd.pkIsDatastoreAttributed(storeMgr))
         {
-            VersionMetaData vermd = sm.getClassMetaData().getVersionMetaData();
-            if (sm.getExecutionContext().getTransaction().getOptimistic() && vermd != null)
+            // Enforce uniqueness of datastore rows
+            try
             {
-                // Optimistic transaction so perform version check before any update
-                long datastoreVersion = connection.getRecordByUserObject(sm.getObject(), false).getVersion();
-                if (datastoreVersion > 0)
+                locateObject(op);
+                throw new NucleusUserException(Localiser.msg("Neo4j.Insert.ObjectWithIdAlreadyExists", op.getObjectAsPrintable(), op.getInternalObjectId()));
+            }
+            catch (NucleusObjectNotFoundException onfe)
+            {
+                // Do nothing since object with this id doesn't exist
+            }
+        }
+
+        ExecutionContext ec = op.getExecutionContext();
+        if (!storeMgr.managesClass(cmd.getFullClassName()))
+        {
+            storeMgr.manageClasses(ec.getClassLoaderResolver(), cmd.getFullClassName());
+        }
+        Table table = storeMgr.getStoreDataForClass(cmd.getFullClassName()).getTable();
+
+        // Create the PropertyContainer; currently only support as a Node.
+        // TODO Support persisting as "attributed relation" where the object has source and target objects and no other relation field
+        OrientElement propObj = db.addVertex("class:" + op.getClassMetaData().getName());
+        if (NucleusLogger.DATASTORE_NATIVE.isDebugEnabled())
+        {
+            NucleusLogger.DATASTORE_NATIVE.debug("Persisting " + op + " as " + propObj);
+        }
+//        addPropertyContainerToTypeIndex(db, propObj, cmd, false);
+
+        // Cache the PropertyContainer with the ObjectProvider
+        op.setAssociatedValue(OrientStoreManager.OBJECT_PROVIDER_PROPCONTAINER, propObj);
+
+        if (cmd.pkIsDatastoreAttributed(storeMgr))
+        {
+            Object id = propObj.getId();
+
+            // Set the identity of the object based on the datastore-generated IDENTITY strategy value
+            if (cmd.getIdentityType() == IdentityType.DATASTORE)
+            {
+                op.setPostStoreNewObjectId(id);
+                if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
                 {
-                    storeMgr.performVersionCheck(sm, Long.valueOf(datastoreVersion), vermd);
+                    NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.Insert.ObjectPersistedWithIdentity", op.getObjectAsPrintable(), id));
                 }
             }
+            else if (cmd.getIdentityType() == IdentityType.APPLICATION)
+            {
+                int[] pkFieldNumbers = cmd.getPKMemberPositions();
+                for (int i=0;i<pkFieldNumbers.length;i++)
+                {
+                    AbstractMemberMetaData mmd = cmd.getMetaDataForManagedMemberAtAbsolutePosition(pkFieldNumbers[i]);
+                    if (storeMgr.isStrategyDatastoreAttributed(cmd, pkFieldNumbers[i]))
+                    {
+                        if (!Number.class.isAssignableFrom(mmd.getType()) && mmd.getType() != long.class && mmd.getType() != int.class)
+                        {
+                            // Field type must be Long since Neo4j node id is a long
+                            throw new NucleusUserException("Any field using IDENTITY value generation with Neo4j should be of type numeric");
+                        }
+                        op.setPostStoreNewObjectId(id);
+                        if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
+                        {
+                            NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.Insert.ObjectPersistedWithIdentity", op.getObjectAsPrintable(), id));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (cmd.getIdentityType() == IdentityType.DATASTORE)
+        {
+            String propName = table.getDatastoreIdColumn().getName();
+            Object key = IdentityUtils.getTargetKeyForDatastoreIdentity(op.getInternalObjectId());
+            propObj.setProperty(propName, key);
+        }
+
+        if (cmd.isVersioned())
+        {
+            VersionMetaData vermd = cmd.getVersionMetaDataForClass();
+            String propName = table.getVersionColumn().getName();
+            if (vermd.getVersionStrategy() == VersionStrategy.VERSION_NUMBER)
+            {
+                long versionNumber = 1;
+                op.setTransactionalVersion(Long.valueOf(versionNumber));
+                if (NucleusLogger.DATASTORE.isDebugEnabled())
+                {
+                    NucleusLogger.DATASTORE.debug(Localiser.msg("Neo4j.Insert.ObjectPersistedWithVersion",
+                        op.getObjectAsPrintable(), op.getInternalObjectId(), "" + versionNumber));
+                }
+                if (vermd.getFieldName() != null)
+                {
+                    AbstractMemberMetaData verMmd = cmd.getMetaDataForMember(vermd.getFieldName());
+                    Object verFieldValue = Long.valueOf(versionNumber);
+                    if (verMmd.getType() == int.class || verMmd.getType() == Integer.class)
+                    {
+                        verFieldValue = Integer.valueOf((int)versionNumber);
+                    }
+                    op.replaceField(verMmd.getAbsoluteFieldNumber(), verFieldValue);
+                }
+                else
+                {
+                    propObj.setProperty(propName, versionNumber);
+                }
+            }
+        }
+
+        if (cmd.hasDiscriminatorStrategy())
+        {
+            // Add discriminator field
+            DiscriminatorMetaData discmd = cmd.getDiscriminatorMetaData();
+            String propName = table.getDiscriminatorColumn().getName();
+            Object discVal = null;
+            if (cmd.getDiscriminatorStrategy() == DiscriminatorStrategy.CLASS_NAME)
+            {
+                discVal = cmd.getFullClassName();
+            }
+            else
+            {
+                discVal = discmd.getValue();
+            }
+            propObj.setProperty(propName, discVal);
+        }
+
+        // Add multi-tenancy discriminator if applicable
+//        if (ec.getNucleusContext().isClassMultiTenant(cmd))
+//        {
+//            propObj.setProperty(table.getMultitenancyColumn().getName(), ec.getNucleusContext().getMultiTenancyId(ec, cmd));
+//        }
+
+        // Insert non-relation fields
+        int[] nonRelPositions = cmd.getNonRelationMemberPositions(ec.getClassLoaderResolver(), ec.getMetaDataManager());
+        StoreFieldManager fm = new StoreFieldManager(op, true, table, propObj);
+        op.provideFields(nonRelPositions, fm);
+
+        return propObj;
+    }
+
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.StorePersistenceHandler#insertObject(org.datanucleus.store.ObjectProvider)
+     */
+    public void insertObject(ObjectProvider op)
+    {
+        ExecutionContext ec = op.getExecutionContext();
+        ManagedConnection mconn = storeMgr.getConnection(ec);
+        try
+        {
+            OrientGraph db = (OrientGraph) mconn.getConnection();
 
             long startTime = System.currentTimeMillis();
             if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
             {
-                AbstractClassMetaData cmd = sm.getClassMetaData();
-                StringBuffer fieldStr = new StringBuffer();
-                for (int i = 0; i < fieldNumbers.length; i++)
+                NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.Insert.Start", op.getObjectAsPrintable(), op.getInternalObjectId()));
+            }
+
+            // Step 1 : Create PropertyContainer with non-relation fields
+            OrientElement propObj = insertObjectToPropertyContainer(op, db);
+            AbstractClassMetaData cmd = op.getClassMetaData();
+            Table table = storeMgr.getStoreDataForClass(cmd.getFullClassName()).getTable();
+
+            // Step 2 : Set relation fields
+            int[] relPositions = cmd.getRelationMemberPositions(ec.getClassLoaderResolver(), ec.getMetaDataManager());
+            if (relPositions.length > 0)
+            {
+                StoreFieldManager fm = new StoreFieldManager(op, true, table, propObj);
+                op.provideFields(relPositions, fm);
+            }
+
+            if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
+            {
+                NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.ExecutionTime", (System.currentTimeMillis() - startTime)));
+            }
+            if (ec.getStatistics() != null)
+            {
+                ec.getStatistics().incrementNumWrites();
+                ec.getStatistics().incrementInsertCount();
+            }
+        }
+        catch (Exception e)
+        {
+            NucleusLogger.PERSISTENCE.error("Exception inserting object " + op, e);
+            throw new NucleusDataStoreException("Exception inserting object for " + op, e);
+        }
+        finally
+        {
+            mconn.release();
+        }
+    }
+
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.StorePersistenceHandler#updateObject(org.datanucleus.store.ObjectProvider, int[])
+     */
+    public void updateObject(ObjectProvider op, int[] fieldNumbers)
+    {
+        assertReadOnlyForUpdateOfObject(op);
+
+        ExecutionContext ec = op.getExecutionContext();
+        ManagedConnection mconn = storeMgr.getConnection(ec);
+        try
+        {
+            OrientGraph db = (OrientGraph) mconn.getConnection();
+
+            long startTime = System.currentTimeMillis();
+            AbstractClassMetaData cmd = op.getClassMetaData();
+            if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
+            {
+                StringBuilder fieldStr = new StringBuilder();
+                for (int i=0;i<fieldNumbers.length;i++)
                 {
                     if (i > 0)
                     {
@@ -240,56 +365,174 @@ public class OrientPersistenceHandler extends AbstractPersistenceHandler
                     }
                     fieldStr.append(cmd.getMetaDataForManagedMemberAtAbsolutePosition(fieldNumbers[i]).getName());
                 }
-                NucleusLogger.DATASTORE_PERSIST.debug(LOCALISER.msg("Orient.Update.Start", sm.toPrintableID(), sm.getInternalObjectId(),
-                    fieldStr.toString()));
+                NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.Update.Start", op.getObjectAsPrintable(), op.getInternalObjectId(), fieldStr.toString()));
             }
 
-            PersistenceCapable pc = (PersistenceCapable) sm.getObject();
-            int[] dirtyFieldNumbers = sm.getDirtyFieldNumbers();
-            if (dirtyFieldNumbers != null && dirtyFieldNumbers.length > 0)
+            if (!storeMgr.managesClass(cmd.getFullClassName()))
             {
-                Object oid = pc.jdoGetObjectId();
-                pc = (PersistenceCapable) findObject(sm.getExecutionContext(), oid);
-                ObjectProvider newSm = sm.getExecutionContext().findObjectProvider(pc);
-                for (int fieldNum : dirtyFieldNumbers)
-                {
-                    Object fieldVal = sm.provideField(fieldNum);
-                    newSm.replaceField(fieldNum, fieldVal);
-                }
-                // sm.replaceManagedPC(pc); //TODO should it be done...?
+                storeMgr.manageClasses(op.getExecutionContext().getClassLoaderResolver(), cmd.getFullClassName());
+            }
+            Table table = storeMgr.getStoreDataForClass(cmd.getFullClassName()).getTable();
 
+            OrientElement propObj = OrientUtils.getPropertyContainerForObjectProvider(db, op);
+            if (propObj == null)
+            {
+                if (cmd.isVersioned())
+                {
+                    throw new NucleusOptimisticException("Object with id " + op.getInternalObjectId() +
+                        " and version " + op.getTransactionalVersion() + " no longer present");
+                }
+                throw new NucleusDataStoreException("Could not find object with id " + op.getInternalObjectId());
+            }
+
+            int[] updatedFieldNums = fieldNumbers;
+            if (cmd.isVersioned())
+            {
+                // Version object so calculate version to store with
+                Object currentVersion = op.getTransactionalVersion();
+                VersionMetaData vermd = cmd.getVersionMetaDataForClass();
+                Object nextVersion = VersionHelper.getNextVersion(vermd.getVersionStrategy(), currentVersion);
+                op.setTransactionalVersion(nextVersion);
+
+                if (vermd.getFieldName() != null)
+                {
+                    // Update the version field value
+                    AbstractMemberMetaData verMmd = cmd.getMetaDataForMember(vermd.getFieldName());
+                    op.replaceField(verMmd.getAbsoluteFieldNumber(), nextVersion);
+
+                    boolean updatingVerField = false;
+                    for (int i=0;i<fieldNumbers.length;i++)
+                    {
+                        if (fieldNumbers[i] == verMmd.getAbsoluteFieldNumber())
+                        {
+                            updatingVerField = true;
+                        }
+                    }
+                    if (!updatingVerField)
+                    {
+                        // Add the version field to the fields to be updated
+                        updatedFieldNums = new int[fieldNumbers.length+1];
+                        System.arraycopy(fieldNumbers, 0, updatedFieldNums, 0, fieldNumbers.length);
+                        updatedFieldNums[fieldNumbers.length] = verMmd.getAbsoluteFieldNumber();
+                    }
+                }
+                else
+                {
+                    // Update the stored surrogate value
+                    String propName = table.getVersionColumn().getName();
+                    propObj.setProperty(propName, nextVersion);
+                }
+            }
+
+            StoreFieldManager fm = new StoreFieldManager(op, false, table, propObj);
+            op.provideFields(updatedFieldNums, fm);
+
+            if (NucleusLogger.DATASTORE_NATIVE.isDebugEnabled())
+            {
+                NucleusLogger.DATASTORE_NATIVE.debug("Updating " + op + " in " + propObj);
+            }
+
+            if (ec.getStatistics() != null)
+            {
+                ec.getStatistics().incrementNumWrites();
+                ec.getStatistics().incrementUpdateCount();
+            }
+
+            if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
+            {
+                NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.ExecutionTime",
+                    (System.currentTimeMillis() - startTime)));
+            }
+        }
+        catch (Exception e)
+        {
+            NucleusLogger.PERSISTENCE.error("Exception updating object " + op, e);
+            throw new NucleusDataStoreException("Exception updating object for " + op, e);
+        }
+        finally
+        {
+            mconn.release();
+        }
+    }
+
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.StorePersistenceHandler#deleteObject(org.datanucleus.store.ObjectProvider)
+     */
+    public void deleteObject(ObjectProvider op)
+    {
+        // Check if read-only so update not permitted
+        assertReadOnlyForUpdateOfObject(op);
+
+        AbstractClassMetaData cmd = op.getClassMetaData();
+        ExecutionContext ec = op.getExecutionContext();
+        ManagedConnection mconn = storeMgr.getConnection(ec);
+        try
+        {
+            OrientGraph db = (OrientGraph)mconn.getConnection();
+
+            OrientElement propObj = OrientUtils.getPropertyContainerForObjectProvider(db, op);
+            if (propObj == null)
+            {
+                throw new NucleusException("Attempt to delete " + op + " yet no Node/Relationship found! See the log for details");
+            }
+
+            // Invoke any cascade deletion
+            op.loadUnloadedFields();
+            int[] relMemberPosns = cmd.getRelationMemberPositions(ec.getClassLoaderResolver(), ec.getMetaDataManager());
+            op.provideFields(relMemberPosns, new DeleteFieldManager(op, true));
+
+            long startTime = System.currentTimeMillis();
+            if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
+            {
+                NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.Delete.Start", op.getObjectAsPrintable(), op.getInternalObjectId()));
+            }
+
+            if (propObj instanceof OrientVertex)
+            {
+                // Remove all Relationships for this Node
+                OrientVertex node = (OrientVertex)propObj;
+                Iterable<Edge> rels = node.getEdges(Direction.BOTH);
+                Iterator<Edge> relIter = rels.iterator();
+                while (relIter.hasNext())
+                {
+                    Edge rel = relIter.next();
+                    if (NucleusLogger.DATASTORE_NATIVE.isDebugEnabled())
+                    {
+                        NucleusLogger.DATASTORE_NATIVE.debug("Deleting relationship " + rel + " for " + node);
+                    }
+                    rel.remove();
+                }
+
+                // Remove it from the DN_TYPES index
+//                db.index().forNodes(OrientStoreManager.PROPCONTAINER_TYPE_INDEX).remove(node);
+
+                // Delete this object
+                if (NucleusLogger.DATASTORE_NATIVE.isDebugEnabled())
+                {
+                    NucleusLogger.DATASTORE_NATIVE.debug("Deleting " + op + " as " + node);
+                }
+                node.remove();
             }
             else
             {
-                // Just needs updating
-                if (NucleusLogger.DATASTORE.isDebugEnabled())
-                {
-                    NucleusLogger.DATASTORE.debug(LOCALISER.msg("Orient.Object.Refreshing", StringUtils.toJVMIDString(pc)));
-                }
-                Object oid = pc.jdoGetObjectId();
-                pc = (PersistenceCapable) findObject(sm.getExecutionContext(), oid);
+                // TODO Cater for persistence as Relationship
             }
 
-            // Do the update in Orient
-            connection.save(pc);
+            if (ec.getStatistics() != null)
+            {
+                ec.getStatistics().incrementNumWrites();
+                ec.getStatistics().incrementDeleteCount();
+            }
+
             if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
             {
-                NucleusLogger.DATASTORE_PERSIST.debug(LOCALISER.msg("Orient.ExecutionTime", (System.currentTimeMillis() - startTime)));
+                NucleusLogger.DATASTORE_PERSIST.debug(Localiser.msg("Neo4j.ExecutionTime", (System.currentTimeMillis() - startTime)));
             }
-            if (storeMgr.getRuntimeManager() != null)
-            {
-                storeMgr.getRuntimeManager().incrementUpdateCount();
-            }
-
-            if (vermd != null && vermd.getVersionStrategy() == VersionStrategy.VERSION_NUMBER)
-            {
-                // versioned object so update its version now that we've persisted the changes
-                long version = connection.getRecordByUserObject(sm.getObject(), false).getVersion();
-                sm.setTransactionalVersion(Long.valueOf(version));
-            }
-
-            // Wrap any unwrapped SCO fields so any subsequent changes are picked up
-            // sm.replaceAllLoadedSCOFieldsWithWrappers();
+        }
+        catch (Exception e)
+        {
+            NucleusLogger.PERSISTENCE.error("Exception deleting object " + op, e);
+            throw new NucleusDataStoreException("Exception deleting object for " + op, e);
         }
         finally
         {
@@ -297,119 +540,92 @@ public class OrientPersistenceHandler extends AbstractPersistenceHandler
         }
     }
 
-    /**
-     * Deletes a persistent object from the database.
-     * @param sm The state manager of the object to be deleted.
-     * @throws NucleusDataStoreException when an error occurs in the datastore communication
-     * @throws NucleusOptimisticException thrown if version checking fails on an optimistic transaction for this object
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.StorePersistenceHandler#fetchObject(org.datanucleus.store.ObjectProvider, int[])
      */
-    public void deleteObject(ObjectProvider sm)
+    public void fetchObject(ObjectProvider op, int[] fieldNumbers)
     {
-        // Check if read-only so update not permitted
-        storeMgr.assertReadOnlyForUpdateOfObject(sm);
+        AbstractClassMetaData cmd = op.getClassMetaData();
 
-        ManagedConnection mconn = storeMgr.getConnection(sm.getExecutionContext());
+        ExecutionContext ec = op.getExecutionContext();
+        ManagedConnection mconn = storeMgr.getConnection(ec);
         try
         {
-            ODatabaseObjectTx connection = (ODatabaseObjectTx) mconn.getConnection();
-            VersionMetaData vermd = sm.getClassMetaData().getVersionMetaData();
-            if (sm.getExecutionContext().getTransaction().getOptimistic() && vermd != null)
+            OrientGraph db = (OrientGraph) mconn.getConnection();
+
+            if (NucleusLogger.DATASTORE_RETRIEVE.isDebugEnabled())
             {
-                // Optimistic transaction so perform version check before any delete
-                long datastoreVersion = connection.getRecordByUserObject(sm.getObject(), false).getVersion();
-                if (datastoreVersion > 0)
+                // Debug information about what we are retrieving
+                StringBuilder str = new StringBuilder("Fetching object \"");
+                str.append(op.getObjectAsPrintable()).append("\" (id=");
+                str.append(op.getInternalObjectId()).append(")").append(" fields [");
+                for (int i=0;i<fieldNumbers.length;i++)
                 {
-                    storeMgr.performVersionCheck(sm, Long.valueOf(datastoreVersion), vermd);
+                    if (i > 0)
+                    {
+                        str.append(",");
+                    }
+                    str.append(cmd.getMetaDataForManagedMemberAtAbsolutePosition(fieldNumbers[i]).getName());
                 }
+                str.append("]");
+                NucleusLogger.DATASTORE_RETRIEVE.debug(str.toString());
             }
 
-            // Load any unloaded fields so that DeleteFieldManager has all field values to work with
-            sm.loadUnloadedFields();
-
-            // Delete all reachable PC objects (due to dependent-field). Updates the StateManagers to be in deleted
-            // state
-            sm.provideFields(sm.getClassMetaData().getAllMemberPositions(), new DeleteFieldManager(sm));
-
-            // This delete is for the root object so just persist to Orient and it will delete all dependent
-            // objects for us
-            long startTime = System.currentTimeMillis();
-            if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
-            {
-                NucleusLogger.DATASTORE_PERSIST.debug(LOCALISER.msg("Orient.Delete.Start", sm.toPrintableID(), sm.getInternalObjectId()));
-            }
-            connection.delete(sm.getObject());
-            if (NucleusLogger.DATASTORE_PERSIST.isDebugEnabled())
-            {
-                NucleusLogger.DATASTORE_PERSIST.debug(LOCALISER.msg("Orient.ExecutionTime", (System.currentTimeMillis() - startTime)));
-            }
-            if (storeMgr.getRuntimeManager() != null)
-            {
-                storeMgr.getRuntimeManager().incrementDeleteCount();
-            }
-
-        }
-        finally
-        {
-            mconn.release();
-        }
-    }
-
-    /**
-     * Fetches fields of a persistent object from the database.
-     * @param sm The state manager of the object to be fetched.
-     * @param fieldNumbers The numbers of the fields to be fetched.
-     * @throws NucleusDataStoreException when an error occurs in the datastore communication
-     */
-    public void fetchObject(ObjectProvider sm, int fieldNumbers[])
-    {
-        AbstractClassMetaData cmd = sm.getClassMetaData();
-        if (NucleusLogger.PERSISTENCE.isDebugEnabled())
-        {
-            // Debug information about what we are retrieving
-            StringBuffer str = new StringBuffer("Fetching object \"");
-            str.append(sm.toPrintableID()).append("\" (id=");
-            str.append(sm.getExecutionContext().getApiAdapter().getObjectId(sm)).append(")").append(" fields [");
-            for (int i = 0; i < fieldNumbers.length; i++)
-            {
-                if (i > 0)
-                {
-                    str.append(",");
-                }
-                str.append(cmd.getMetaDataForManagedMemberAtAbsolutePosition(fieldNumbers[i]).getName());
-            }
-            str.append("]");
-            NucleusLogger.PERSISTENCE.debug(str);
-        }
-
-        ManagedConnection mconn = storeMgr.getConnection(sm.getExecutionContext());
-        try
-        {
-            final ODatabaseObjectTx connection = (ODatabaseObjectTx) mconn.getConnection();
             long startTime = System.currentTimeMillis();
             if (NucleusLogger.DATASTORE_RETRIEVE.isDebugEnabled())
             {
-                NucleusLogger.DATASTORE_RETRIEVE.debug(LOCALISER.msg("Orient.Fetch.Start", sm.toPrintableID(), sm.getInternalObjectId()));
+                NucleusLogger.DATASTORE_RETRIEVE.debug(Localiser.msg("Neo4j.Fetch.Start", op.getObjectAsPrintable(), op.getInternalObjectId()));
             }
 
-            // Process all requested fields so they are managed (loaded) and active now
-            sm.replaceFields(fieldNumbers, new ActivationFieldManager(connection, sm));
-
-            VersionMetaData vermd = cmd.getVersionMetaData();
-            if (vermd != null && vermd.getVersionStrategy() == VersionStrategy.VERSION_NUMBER)
+            if (!storeMgr.managesClass(cmd.getFullClassName()))
             {
-                // Object needs versioning so store its current datastore version in the StateManager
-                long version = connection.getRecordByUserObject(sm.getObject(), false).getVersion();
-                sm.setTransactionalVersion(Long.valueOf(version));
+                storeMgr.manageClasses(op.getExecutionContext().getClassLoaderResolver(), cmd.getFullClassName());
+            }
+            Table table = storeMgr.getStoreDataForClass(cmd.getFullClassName()).getTable();
+
+            // Find the Node for this ObjectProvider
+            OrientElement propObj = OrientUtils.getPropertyContainerForObjectProvider(db, op);
+            if (propObj == null)
+            {
+                throw new NucleusObjectNotFoundException("Datastore object for " + op + " is not found");
+            }
+
+            // Retrieve the fields required
+            FieldManager fm = new FetchFieldManager(op, propObj, table);
+            op.replaceFields(fieldNumbers, fm);
+
+            if (cmd.isVersioned() && op.getTransactionalVersion() == null)
+            {
+                // No version set, so retrieve it
+                VersionMetaData vermd = cmd.getVersionMetaDataForClass();
+                if (vermd.getFieldName() != null)
+                {
+                    // Version stored in a field
+                    Object datastoreVersion = op.provideField(cmd.getAbsolutePositionOfMember(vermd.getFieldName()));
+                    op.setVersion(datastoreVersion);
+                }
+                else
+                {
+                    // Surrogate version
+                    String propName = table.getVersionColumn().getName();
+                    Object datastoreVersion = propObj.getProperty(propName);
+                    op.setVersion(datastoreVersion);
+                }
             }
 
             if (NucleusLogger.DATASTORE_RETRIEVE.isDebugEnabled())
             {
-                NucleusLogger.DATASTORE_RETRIEVE.debug(LOCALISER.msg("Orient.ExecutionTime", (System.currentTimeMillis() - startTime)));
+                NucleusLogger.DATASTORE_RETRIEVE.debug(Localiser.msg("Neo4j.ExecutionTime", (System.currentTimeMillis() - startTime)));
             }
-            if (storeMgr.getRuntimeManager() != null)
+            if (ec.getStatistics() != null)
             {
-                storeMgr.getRuntimeManager().incrementFetchCount();
+                ec.getStatistics().incrementFetchCount();
             }
+        }
+        catch (Exception e)
+        {
+            NucleusLogger.DATASTORE_RETRIEVE.error("Exception on fetch of fields", e);
+            throw new NucleusDataStoreException("Exception on fetch of fields", e);
         }
         finally
         {
@@ -417,106 +633,46 @@ public class OrientPersistenceHandler extends AbstractPersistenceHandler
         }
     }
 
-    /**
-     * Accessor for an (at least) hollow PersistenceCapable object matching the given id.
-     * @param ec the ExecutionContext which will manage the object
-     * @param id the id of the object in question.
-     * @return a persistable object with a valid state (for example: hollow) or null, indicating that the implementation
-     * leaves the instantiation work to us.
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.StorePersistenceHandler#locateObject(org.datanucleus.store.ObjectProvider)
+     */
+    public void locateObject(ObjectProvider op)
+    {
+        final AbstractClassMetaData cmd = op.getClassMetaData();
+        if (cmd.getIdentityType() == IdentityType.APPLICATION ||
+            cmd.getIdentityType() == IdentityType.DATASTORE)
+        {
+            ExecutionContext ec = op.getExecutionContext();
+            ManagedConnection mconn = storeMgr.getConnection(ec);
+            try
+            {
+                if (!storeMgr.managesClass(cmd.getFullClassName()))
+                {
+                    storeMgr.manageClasses(ec.getClassLoaderResolver(), cmd.getFullClassName());
+                }
+
+                OrientGraph db = (OrientGraph) mconn.getConnection();
+                OrientElement propObj = OrientUtils.getPropertyContainerForObjectProvider(db, op);
+                if (propObj == null)
+                {
+                    throw new NucleusObjectNotFoundException("Object not found for id=" + op.getInternalObjectId());
+                }
+            }
+            finally
+            {
+                mconn.release();
+            }
+        }
+    }
+
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.StorePersistenceHandler#findObject(org.datanucleus.store.ExecutionContext, java.lang.Object)
      */
     public Object findObject(ExecutionContext ec, Object id)
     {
-        Object pc = null;
-
         ManagedConnection mconn = storeMgr.getConnection(ec);
-        try
-        {
-            ODatabaseObjectTx cont = (ODatabaseObjectTx) mconn.getConnection();
-
-            if (id instanceof String)
-            {
-                String[] splitted = ((String) id).split("\\[OID\\]");// TODO CONSTANT!!!
-                long recordId = Long.parseLong(splitted[0]);
-                String className = splitted[1];
-                String[] classSplitted = className.split("\\.");
-                String clusterName = classSplitted[classSplitted.length - 1];
-                int clusterId = cont.getClusterIdByName(clusterName.toLowerCase());
-                ORecordId orid = new ORecordId(clusterId, recordId);
-
-                pc = cont.load(orid);
-                if (pc == null)
-                {
-                    return null;
-                }
-                if (ec.findObjectProvider(pc) == null)
-                {
-                    StateManagerFactory.newStateManagerForHollowPreConstructed(ec, id, pc);
-                }
-            }
-            else if (id instanceof OID)
-            {
-                OID oid = (OID) id;
-                long recordId = (Long) oid.getKeyValue();
-                String className = oid.getPcClass();
-                String[] classSplitted = className.split("\\.");
-                String clusterName = classSplitted[classSplitted.length - 1];
-                int clusterId = cont.getClusterIdByName(clusterName);
-                ORecordId orid = new ORecordId(clusterId, recordId);
-
-                pc = cont.load(orid);
-                if (pc == null)
-                {
-                    return null;
-                }
-                if (ec.findObjectProvider(pc) == null)
-                {
-                    StateManagerFactory.newStateManagerForHollowPreConstructed(ec, id, pc);
-                }
-            }
-            else
-            {
-                System.out.println("TODO!!");
-                throw new RuntimeException("TODO!!!!");// TODO
-            }
-        }
-        finally
-        {
-            mconn.release();
-        }
-        return pc;
-    }
-
-    /**
-     * Locates this object in the datastore.
-     * @param sm The StateManager for the object to be found
-     * @throws NucleusObjectNotFoundException if the object doesnt exist
-     * @throws NucleusDataStoreException when an error occurs in the datastore communication
-     */
-    public void locateObject(ObjectProvider sm)
-    {
-        ExecutionContext ec = sm.getExecutionContext();
-        ClassLoaderResolver clr = ec.getClassLoaderResolver();
-        AbstractClassMetaData cmd = sm.getClassMetaData();
-
-        ManagedConnection mconn = storeMgr.getConnection(ec);
-        try
-        {
-            ODatabaseObjectTx connection = (ODatabaseObjectTx) mconn.getConnection();
-            // TODO
-            // if(is detached)
-            // then reattach
-            // end
-
-            if (connection.getRecordByUserObject(sm.getObject(), true) == null)
-            {
-                throw new NucleusObjectNotFoundException(LOCALISER.msg("Orient.Object.NotFound", sm.toPrintableID(),
-                    sm.getInternalObjectId()));
-            }
-
-        }
-        finally
-        {
-            mconn.release();
-        }
+        OrientGraph db = (OrientGraph) mconn.getConnection();
+        OrientElement element = db.getElement(id);
+        return null;
     }
 }

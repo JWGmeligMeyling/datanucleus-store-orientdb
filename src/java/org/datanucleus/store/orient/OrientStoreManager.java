@@ -20,44 +20,43 @@ package org.datanucleus.store.orient;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Set;
 
+import com.orientechnologies.orient.core.id.ORID;
+import com.tinkerpop.blueprints.impls.orient.OrientGraph;
 import org.datanucleus.ClassLoaderResolver;
-import org.datanucleus.OMFContext;
-import org.datanucleus.PersistenceConfiguration;
-import org.datanucleus.UserTransaction;
-import org.datanucleus.identity.OIDFactory;
+import org.datanucleus.Configuration;
+import org.datanucleus.ExecutionContext.LifecycleListener;
+import org.datanucleus.ExecutionContext;
+import org.datanucleus.PersistenceNucleusContext;
 import org.datanucleus.metadata.AbstractClassMetaData;
 import org.datanucleus.metadata.ClassMetaData;
 import org.datanucleus.metadata.ClassPersistenceModifier;
-import org.datanucleus.metadata.IdentityStrategy;
-import org.datanucleus.metadata.IdentityType;
 import org.datanucleus.store.AbstractStoreManager;
 import org.datanucleus.store.DefaultCandidateExtent;
-import org.datanucleus.store.ExecutionContext;
 import org.datanucleus.store.Extent;
-import org.datanucleus.store.ObjectProvider;
 import org.datanucleus.store.StoreData;
 import org.datanucleus.store.connection.ManagedConnection;
 import org.datanucleus.store.exceptions.NoExtentException;
+import org.datanucleus.store.schema.table.CompleteClassTable;
 import org.datanucleus.util.Localiser;
 import org.datanucleus.util.NucleusLogger;
-import org.datanucleus.util.StringUtils;
-
-import com.orientechnologies.orient.core.db.object.ODatabaseObject;
-import com.orientechnologies.orient.core.db.object.ODatabaseObjectTx;
-import com.orientechnologies.orient.core.id.ORID;
-import com.orientechnologies.orient.core.id.ORecordId;
-import com.orientechnologies.orient.core.metadata.schema.OSchema;
 
 /**
  * Store Manager for Orient Database
  */
 public class OrientStoreManager extends AbstractStoreManager
 {
+    public static final String OBJECT_PROVIDER_PROPCONTAINER = "BLIEP";
+
     /** Localiser for messages. */
-    protected static final Localiser LOCALISER_ORIENT = Localiser.getInstance("org.datanucleus.store.orient.Localisation",
-        OrientStoreManager.class.getClassLoader());
+    static {
+        Localiser.registerBundle(
+            "org.datanucleus.store.orient.Localisation",
+            OrientStoreManager.class.getClassLoader()
+        );
+    }
 
     /**
      * Collection of the currently active ObjectContainers. Used for providing class mapping information when they are
@@ -68,37 +67,33 @@ public class OrientStoreManager extends AbstractStoreManager
     /**
      * Constructor for a new Orient StoreManager. Stores the basic information required for the datastore management.
      * @param clr the ClassLoaderResolver
-     * @param omfContext The corresponding ObjectManagerFactory omfContext.
+     * @param nucleusContext The corresponding PersistenceNucleusContext.
+     * @param props The properties.
      */
-    public OrientStoreManager(ClassLoaderResolver clr, OMFContext omfContext)
+    public OrientStoreManager(ClassLoaderResolver clr, PersistenceNucleusContext nucleusContext, Map<String, Object> props)
     {
-        super("orient", clr, omfContext);
-
-        PersistenceConfiguration conf = omfContext.getPersistenceConfiguration();
+        super("orient", clr, nucleusContext, props);
 
         // Log the manager configuration
         logConfiguration();
 
         // Handler for persistence process
-        persistenceHandler2 = new OrientPersistenceHandler(this);
+        persistenceHandler = new OrientPersistenceHandler(this);
 
         // Make sure transactional connection factory has listener for closing object container
-        omfContext.addObjectManagerListener(new ExecutionContext.LifecycleListener()
+        nucleusContext.addExecutionContextListener(new LifecycleListener()
         {
             public void preClose(ExecutionContext ec)
             {
                 //TODO is it the right place...?
-                ODatabaseObjectTx conn = (ODatabaseObjectTx) getConnection(ec).getConnection();
+                OrientGraph conn = (OrientGraph) getConnection(ec).getConnection();
                 if(!conn.isClosed()){
-                    conn.close();
+                    conn.shutdown();
                 }
             }
             
             
         });
-
-        // Initialise the auto start process
-        initialiseAutoStart(clr);
     }
 
     
@@ -121,7 +116,7 @@ public class OrientStoreManager extends AbstractStoreManager
         if (NucleusLogger.DATASTORE.isDebugEnabled())
         {
 
-            PersistenceConfiguration conf = omfContext.getPersistenceConfiguration();
+            Configuration conf = this.nucleusContext.getConfiguration();
 
             String outputFilename = conf.getStringProperty("datanucleus.orient.outputFile");
             if (outputFilename != null)
@@ -156,7 +151,7 @@ public class OrientStoreManager extends AbstractStoreManager
 
         // Filter out any "simple" type classes
         String[] filteredClassNames = 
-            getOMFContext().getTypeManager().filterOutSupportedSecondClassNames(classNames);
+            this.nucleusContext.getTypeManager().filterOutSupportedSecondClassNames(classNames);
 
         // Find the ClassMetaData for these classes and all referenced by these classes
         Iterator iter = getMetaDataManager().getReferencedClasses(filteredClassNames, clr).iterator();
@@ -191,31 +186,14 @@ public class OrientStoreManager extends AbstractStoreManager
             Iterator containerIter = activeObjectContainers.iterator();
             while (containerIter.hasNext())
             {
-                ODatabaseObjectTx cont = (ODatabaseObjectTx) containerIter.next();
+                OrientGraph cont = (OrientGraph) containerIter.next();
                 registerClassInOrient(cont, (AbstractClassMetaData) data.getMetaData());
             }
         }
     }
 
-    public void registerClassInOrient(ODatabaseObjectTx cont, AbstractClassMetaData metaData)
-    {
-        try
-        {
-            registerClassInOrient(cont, Class.forName(metaData.getFullClassName()));
-        }
-        catch (ClassNotFoundException e)
-        {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
-        }
-    }
-
-    public static void registerClassInOrient(ODatabaseObjectTx cont, Class clazz)
-    {
-        if(cont.getEntityManager().getEntityClass(clazz.getSimpleName()) == null){
-            
-            cont.getEntityManager().registerEntityClass(clazz);
-        }
+    public void registerClassInOrient(OrientGraph cont, AbstractClassMetaData metaData) {
+        assert cont.getVertexType(metaData.getTable()) != null;
     }
 
     /**
@@ -223,7 +201,7 @@ public class OrientStoreManager extends AbstractStoreManager
      * into the datastore container.
      * @param cont ObjectContainer
      */
-    public void registerObjectContainer(ODatabaseObjectTx cont)
+    public void registerObjectContainer(OrientGraph cont)
     {
         if (cont == null)
         {
@@ -247,7 +225,7 @@ public class OrientStoreManager extends AbstractStoreManager
      * closed and hence not interested in more class mapping information.
      * @param cont ObjectContainer
      */
-    public void deregisterObjectContainer(ODatabaseObjectTx cont)
+    public void deregisterObjectContainer(OrientGraph cont)
     {
         if (cont == null)
         {
@@ -265,43 +243,43 @@ public class OrientStoreManager extends AbstractStoreManager
      * @param pc The object
      * @return The identity
      */
-    public Object getObjectIdForObject(ExecutionContext ec, Object pc)
-    {
-        AbstractClassMetaData cmd = getMetaDataManager().getMetaDataForClass(pc.getClass().getName(), ec.getClassLoaderResolver());
-        Object id = null;
-        ObjectProvider sm = ec.findObjectProvider(pc);
-        if (sm != null)
-        {
-            // Object is managed, so return its id
-            return sm.getInternalObjectId();
-        }
-
-        ODatabaseObjectTx cont = (ODatabaseObjectTx) getConnection(ec).getConnection();
-        try
-        {
-            if (cmd.getIdentityType() == IdentityType.DATASTORE)
-            {
-                ORID orid = cont.getRecordByUserObject(pc, false).getIdentity();
-                if (orid == null)
-                {
-                    return null;
-                }
-                String idKey = ORecordId.generateString(((ORecordId) orid).getClusterId(), ((ORecordId) id).getClusterPosition());
-                return OIDFactory.getInstance(getOMFContext(), idKey);
-            }
-            else if (cmd.getIdentityType() == IdentityType.APPLICATION)
-            {
-                // If the fields are loaded then the id is known
-                return getApiAdapter().getNewApplicationIdentityObjectId(pc, cmd);
-            }
-        }
-        finally
-        {
-        }
-
-        return id;
-    }
-
+//    public Object getObjectIdForObject(ExecutionContext ec, Object pc)
+//    {
+//        AbstractClassMetaData cmd = getMetaDataManager().getMetaDataForClass(pc.getClass().getName(), ec.getClassLoaderResolver());
+//        Object id = null;
+//        ObjectProvider sm = ec.findObjectProvider(pc);
+//        if (sm != null)
+//        {
+//            // Object is managed, so return its id
+//            return sm.getInternalObjectId();
+//        }
+//
+//        OrientGraph cont = (OrientGraph) getConnection(ec).getConnection();
+//        try
+//        {
+//            if (cmd.getIdentityType() == IdentityType.DATASTORE)
+//            {
+//
+//                ORID orid = cont.getRecordByUserObject(pc, false).getIdentity();
+//                if (orid == null)
+//                {
+//                    return null;
+//                }
+//                String idKey = ORecordId.generateString(((ORecordId) orid).getClusterId(), ((ORecordId) id).getClusterPosition());
+//                return OIDFactory.getInstance(getOMFContext(), idKey);
+//            }
+//            else if (cmd.getIdentityType() == IdentityType.APPLICATION)
+//            {
+//                // If the fields are loaded then the id is known
+//                return getApiAdapter().getNewApplicationIdentityObjectId(pc, cmd);
+//            }
+//        }
+//        finally
+//        {
+//        }
+//
+//        return id;
+//    }
 
     /**
      * Accessor for an Extent for a class.
@@ -324,13 +302,73 @@ public class OrientStoreManager extends AbstractStoreManager
     /**
      * Accessor for the supported options in string form
      */
-    public Collection getSupportedOptions()
+    public Collection<String> getSupportedOptions()
     {
-        Set set = new HashSet();
+        Set<String> set = new HashSet<String>();
         set.add("DatastoreIdentity");
         // set.add("ApplicationIdentity");
         set.add("OptimisticTransaction");
         // set.add("TransactionIsolationLevel.read-committed");
         return set;
+    }
+
+
+    /* (non-Javadoc)
+     * @see org.datanucleus.store.AbstractStoreManager#manageClasses(org.datanucleus.ClassLoaderResolver, java.lang.String[])
+     */
+    @Override
+    public void manageClasses(ClassLoaderResolver clr, String... classNames)
+    {
+        if (classNames == null)
+        {
+            return;
+        }
+
+        ManagedConnection mconn = getConnection(-1);
+        try
+        {
+            OrientGraph db = (OrientGraph)mconn.getConnection();
+
+            manageClasses(classNames, clr, db);
+        }
+        finally
+        {
+            mconn.release();
+        }
+    }
+
+    public void manageClasses(String[] classNames, ClassLoaderResolver clr, OrientGraph db)
+    {
+        if (classNames == null)
+        {
+            return;
+        }
+
+        // Filter out any "simple" type classes
+        String[] filteredClassNames = getNucleusContext().getTypeManager().filterOutSupportedSecondClassNames(classNames);
+
+        // Find the ClassMetaData for these classes and all referenced by these classes
+        Set<String> clsNameSet = new HashSet<String>();
+        Iterator iter = getMetaDataManager().getReferencedClasses(filteredClassNames, clr).iterator();
+        while (iter.hasNext())
+        {
+            ClassMetaData cmd = (ClassMetaData)iter.next();
+            if (cmd.getPersistenceModifier() == ClassPersistenceModifier.PERSISTENCE_CAPABLE && !cmd.isAbstract() && !cmd.isEmbeddedOnly())
+            {
+                if (!storeDataMgr.managesClass(cmd.getFullClassName()))
+                {
+                    StoreData sd = storeDataMgr.get(cmd.getFullClassName());
+                    if (sd == null)
+                    {
+                        CompleteClassTable table = new CompleteClassTable(this, cmd, null);
+                        sd = newStoreData(cmd, clr);
+                        sd.setTable(table);
+                        registerStoreData(sd);
+                    }
+
+                    clsNameSet.add(cmd.getFullClassName());
+                }
+            }
+        }
     }
 }
